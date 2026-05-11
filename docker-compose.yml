@@ -1,0 +1,88 @@
+# DMS — Orquestração IMX500 + FatigueV1 + DrowsyDriving
+#
+# Pré-requisitos no host (já configurado):
+#   sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="VirtualCam" exclusive_caps=1
+#
+#
+# Uso:
+#   docker compose up --build
+
+services:
+
+  # ── Bridge ─────────────────────────────────────────────────────────────────
+  # Único processo que fala com o IMX500 via libcamera/picamera2.
+  # Captura frames BGR888 e espelha como YUV420P em /dev/video10 (v4l2loopback).
+  # Os outros dois containers nunca acessam a câmera real.
+  camera-bridge:
+    build: ./camera-bridge
+    container_name: camera-bridge
+    volumes:
+      - /dev:/dev                      # libcamera precisa de media*, v4l-subdev*, etc.
+      - /run/udev:/run/udev:ro         # banco udev — necessário para enumeração da câmera
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LIBCAMERA_IPA_FORCE_ISOLATION=0    # roda IPA em-processo (sandbox falha no Docker)
+      - LIBCAMERA_LOG_LEVELS=WARNING
+    group_add:
+      - "44"   # video
+      - "993"  # render
+    security_opt:
+      - seccomp:unconfined     # libcamera usa ioctls fora do perfil seccomp default
+    restart: unless-stopped
+    healthcheck:
+      # bridge.py cria /tmp/bridge_ready após os 5 primeiros frames enviados
+      test: ["CMD-SHELL", "test -f /tmp/bridge_ready"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 15s
+
+  # ── FatigueV1: detecção de fadiga facial ──────────────────────────────────
+  # /dev/video10 mapeado como /dev/video0 → cv2.VideoCapture(0) encontra o loopback.
+  # Sem --picamera → nunca tenta picamera2.
+  fatigue:
+    build:
+      context: https://github.com/euBrunoMelo/FatigueV1.git
+    container_name: fatigue-detection
+    depends_on:
+      camera-bridge:
+        condition: service_healthy
+    devices:
+      - /dev/video10:/dev/video0   # loopback parece câmera real para o container
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OPENCV_VIDEOIO_PRIORITY_GSTREAMER=0
+    group_add:
+      - "44"   # video
+    security_opt:
+      - seccomp:unconfined
+    restart: unless-stopped
+    # Sobrescreve o CMD padrão do Dockerfile (que usa --picamera).
+    # Sem --picamera o script usa cv2.VideoCapture(0) = /dev/video10 mapeado.
+    command: ["python3", "run_host.py", "--model-dir", "/app"]
+
+  # ── DrowsyDriving: detecção de comportamentos no volante ──────────────────
+  # picamera2 tenta inicializar, falha (sem /dev/media* no container) e cai no
+  # fallback OpenCV → cv2.VideoCapture(0) abre /dev/video10 mapeado.
+  drowsy:
+    build:
+      context: ../DrowsyDriving
+    container_name: drowsy-driving
+    depends_on:
+      camera-bridge:
+        condition: service_healthy
+    devices:
+      - /dev/video10:/dev/video0   # mesmo mapeamento
+    volumes:
+      - ../DrowsyDriving/logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LIBCAMERA_IPA_FORCE_ISOLATION=0
+      - LIBCAMERA_LOG_LEVELS=WARNING
+      - OPENCV_VIDEOIO_PRIORITY_GSTREAMER=0
+    group_add:
+      - "44"   # video
+      - "993"  # render
+    security_opt:
+      - seccomp:unconfined
+    restart: unless-stopped
