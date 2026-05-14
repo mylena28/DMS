@@ -26,8 +26,9 @@ services:
     group_add:
       - "44"   # video
       - "993"  # render
+    privileged: true            # libcamera precisa abrir /dev/media* e dma-buf
     security_opt:
-      - seccomp:unconfined     # libcamera usa ioctls fora do perfil seccomp default
+      - seccomp:unconfined
     restart: unless-stopped
     healthcheck:
       # bridge.py cria /tmp/bridge_ready após os 5 primeiros frames enviados
@@ -56,33 +57,45 @@ services:
       - "44"   # video
     security_opt:
       - seccomp:unconfined
+    volumes:
+      - ./logs/fatigue:/app/logs
+      - ./logs/fatigue/recordings:/app/recordings
+      - ./logs/fatigue/events:/app/events
     restart: unless-stopped
     # Sobrescreve o CMD padrão do Dockerfile (que usa --picamera).
     # Sem --picamera o script usa cv2.VideoCapture(0) = /dev/video10 mapeado.
     command: ["python3", "run_host.py", "--model-dir", "/app"]
 
   # ── DrowsyDriving: detecção de comportamentos no volante ──────────────────
-  # picamera2 tenta inicializar, falha (sem /dev/media* no container) e cai no
-  # fallback OpenCV → cv2.VideoCapture(0) abre /dev/video10 mapeado.
+  # O main.py detecta Pi5 pela presença de /usr/bin/rpicam-hello e prioriza
+  # Picamera2. Mesmo falhando, libcamera mantém /dev/video0 aberto, impedindo
+  # o fallback OpenCV. O entrypoint abaixo remove o binário antes de iniciar,
+  # tornando IS_RASPBERRY_PI=False → OpenCV usa /dev/video10 diretamente.
   drowsy:
     build:
-      context: ../DrowsyDriving
+      context: https://github.com/mylena28/DrowsyDriving.git
     container_name: drowsy-driving
     depends_on:
       camera-bridge:
         condition: service_healthy
     devices:
       - /dev/video10:/dev/video0   # mesmo mapeamento
-    volumes:
-      - ../DrowsyDriving/logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
-      - LIBCAMERA_IPA_FORCE_ISOLATION=0
-      - LIBCAMERA_LOG_LEVELS=WARNING
       - OPENCV_VIDEOIO_PRIORITY_GSTREAMER=0
     group_add:
       - "44"   # video
       - "993"  # render
     security_opt:
       - seccomp:unconfined
+    volumes:
+      - ./logs/drowsy:/app/logs
+    entrypoint:
+      - sh
+      - -c
+      - |
+        rm -f /usr/bin/rpicam-hello /usr/bin/libcamera-hello
+        mkdir -p /app/logs /tmp/libcamera /tmp/Ultralytics
+        chown -R salte:salte /app/logs /tmp/libcamera /tmp/Ultralytics 2>/dev/null || true
+        exec runuser -u salte -- python3 main.py
     restart: unless-stopped

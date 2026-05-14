@@ -80,8 +80,6 @@ O código do `FatigueV1` é clonado automaticamente pelo Docker durante o build.
 docker compose up --build
 ```
 
-O build do `fatigue-detection` clona o repositório FatigueV1 do GitHub automaticamente.
-
 ### Usos seguintes (sem rebuild)
 
 ```bash
